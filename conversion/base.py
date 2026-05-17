@@ -2339,6 +2339,7 @@ class LazyTorchTensor(gguf.LazyBase):
     _dtype_map: dict[torch.dtype, type] = {
         torch.float16: np.float16,
         torch.float32: np.float32,
+        torch.int32: np.int32,
         torch.uint8: np.uint8,
     }
 

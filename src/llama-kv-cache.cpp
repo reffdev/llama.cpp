@@ -1087,6 +1087,37 @@ void llama_kv_cache::apply_ubatch(const slot_info & sinfo, const llama_ubatch & 
     }
 }
 
+llama_kv_cache::slot_info llama_kv_cache::mtp_slot_info(llama_seq_id seq_id) const {
+    GGML_ASSERT(seq_id >= 0 && (size_t) seq_id < seq_to_stream.size());
+
+    const uint32_t st    = seq_to_stream[seq_id];
+    const auto &   cells = v_cells[st];
+
+    llama_pos pmax = cells.seq_pos_max(seq_id);
+
+    uint32_t idx = 0;
+
+    if (pmax >= 0) {
+        for (uint32_t i = 0; i < cells.size(); ++i) {
+            if (!cells.seq_has(i, seq_id)) {
+                continue;
+            }
+            if (cells.pos_get(i) == pmax) {
+                idx = i;
+                break;
+            }
+        }
+    }
+
+    slot_info sinfo;
+    sinfo.s0 = st;
+    sinfo.s1 = st;
+    sinfo.strm.push_back(seq_id);
+    sinfo.idxs.push_back({idx});
+
+    return sinfo;
+}
+
 bool llama_kv_cache::get_can_shift() const {
     // Step35 uses per-layer RoPE dims; K-shift assumes a single global n_rot.
     if (model.arch == LLM_ARCH_STEP35) {
@@ -2389,6 +2420,11 @@ llama_kv_cache_context::llama_kv_cache_context(
         llama_kv_cache * kv,
         llama_kv_cache::slot_info_vec_t sinfos,
         std::vector<llama_ubatch> ubatches) : status(LLAMA_MEMORY_STATUS_SUCCESS), kv(kv), sinfos(std::move(sinfos)), ubatches(std::move(ubatches)) {
+    // Pre-compute n_kv so read-only contexts (e.g. MTP cross-attention) can
+    // access K/V views without calling apply() (which writes to the cache).
+    if (!this->sinfos.empty()) {
+        n_kv = kv->get_n_kv(this->sinfos[0]);
+    }
 }
 
 llama_kv_cache_context::~llama_kv_cache_context() = default;
