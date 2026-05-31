@@ -1229,6 +1229,26 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
         pimpl->lora.emplace_back(std::move(lora)); // copy to list of loaded adapters
     }
 
+    // Load MTP assistant into target model if --spec-type draft-mtp and a draft model path is provided
+    {
+        const bool spec_type_draft_mtp = std::find(params.speculative.types.begin(),
+                                             params.speculative.types.end(),
+                                             COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params.speculative.types.end();
+        if (spec_type_draft_mtp && !params.speculative.draft.mparams.path.empty()) {
+            const char * path_mtp = params.speculative.draft.mparams.path.c_str();
+            LOG_INF("%s: loading MTP assistant '%s' into target model\n", __func__, path_mtp);
+            llama_model_params mparams_mtp = common_model_params_to_llama(params);
+            int rc = llama_model_load_mtp_from_file(model, path_mtp, mparams_mtp);
+            if (rc != 0) {
+                LOG_ERR("%s: failed to load MTP assistant from '%s' (rc=%d)\n", __func__, path_mtp, rc);
+                pimpl->model.reset(model);
+                return;
+            }
+            // Clear the draft model path so the server doesn't try to load it separately
+            params.speculative.draft.mparams.path.clear();
+        }
+    }
+
     // updates params.sampling
     // TODO: fix naming
     common_init_sampler_from_model(model, params.sampling);

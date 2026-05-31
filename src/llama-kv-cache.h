@@ -191,6 +191,10 @@ public:
     // emplace the ubatch context into slot: [sinfo.idxs[0...ubatch.n_tokens - 1]]
     void apply_ubatch(const slot_info & sinfo, const llama_ubatch & ubatch);
 
+    // Gemma4 MTP: read-only slot_info pointing at existing cells for seq_id (no allocation).
+    // Used for cross-attention graphs that only READ from the KV cache.
+    slot_info mtp_slot_info(llama_seq_id seq_id) const;
+
     //
     // input API
     //

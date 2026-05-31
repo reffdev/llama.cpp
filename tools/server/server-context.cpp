@@ -937,25 +937,33 @@ private:
             params_base.speculative.draft.ctx_dft = ctx_dft.get();
         } else if (std::find(params_base.speculative.types.begin(), params_base.speculative.types.end(),
                              COMMON_SPECULATIVE_TYPE_DRAFT_MTP) != params_base.speculative.types.end()) {
-            SRV_INF("creating MTP draft context against the target model '%s'\n",
-                    params_base.model.path.c_str());
+            if (llama_model_has_mtp_assistant(model_tgt)) {
+                // Gemma 4 MTP: assistant is nested in the target (no separate context needed).
+                SRV_INF("%s", "MTP assistant loaded into target model (no separate draft context)\n");
+                params_base.speculative.draft.ctx_tgt = ctx_tgt;
+                params_base.speculative.draft.ctx_dft = ctx_tgt;
+            } else {
+                // Qwen-style MTP: heads are embedded in the same GGUF, need a second context.
+                SRV_INF("creating MTP draft context against the target model '%s'\n",
+                        params_base.model.path.c_str());
 
-            auto cparams_mtp = common_context_params_to_llama(params_base);
-            cparams_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
-            cparams_mtp.type_k   = params_base.speculative.draft.cache_type_k;
-            cparams_mtp.type_v   = params_base.speculative.draft.cache_type_v;
-            cparams_mtp.n_rs_seq = 0;
+                auto cparams_mtp = common_context_params_to_llama(params_base);
+                cparams_mtp.ctx_type = LLAMA_CONTEXT_TYPE_MTP;
+                cparams_mtp.type_k   = params_base.speculative.draft.cache_type_k;
+                cparams_mtp.type_v   = params_base.speculative.draft.cache_type_v;
+                cparams_mtp.n_rs_seq = 0;
 
-            ctx_dft.reset(llama_init_from_model(model_tgt, cparams_mtp));
-            if (ctx_dft == nullptr) {
-                SRV_ERR("%s", "failed to create MTP context\n");
-                return false;
+                ctx_dft.reset(llama_init_from_model(model_tgt, cparams_mtp));
+                if (ctx_dft == nullptr) {
+                    SRV_ERR("%s", "failed to create MTP context\n");
+                    return false;
+                }
+
+                ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
+
+                params_base.speculative.draft.ctx_tgt = ctx_tgt;
+                params_base.speculative.draft.ctx_dft = ctx_dft.get();
             }
-
-            ctx_dft_seq_rm_type = common_context_can_seq_rm(ctx_dft.get());
-
-            params_base.speculative.draft.ctx_tgt = ctx_tgt;
-            params_base.speculative.draft.ctx_dft = ctx_dft.get();
         }
 
         if (has_mmproj) {

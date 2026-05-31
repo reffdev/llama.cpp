@@ -765,6 +765,90 @@ class Gemma4Model(Gemma3Model):
         yield from super().modify_tensors(data_torch, name, bid)
 
 
+@ModelBase.register("Gemma4AssistantForCausalLM")
+class Gemma4AssistantModel(Gemma4Model):
+    model_arch = gguf.MODEL_ARCH.GEMMA4_ASSISTANT
+
+    def set_vocab(self):
+        self._set_vocab_none()
+
+    def tensor_force_quant(self, name, new_name, bid, n_dims):
+        # token_ordering is an integer permutation index — must be stored as I32
+        if "token_ordering" in new_name:
+            return gguf.GGMLQuantizationType.I32
+        return super().tensor_force_quant(name, new_name, bid, n_dims)
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+        # Explicitly write vocab_size since the "none" tokenizer doesn't set it
+        self.gguf_writer.add_vocab_size(self.hparams.get("vocab_size", 262144))
+        hp = self.hparams
+        # The assistant has dual head dims: SWA uses head_dim, full uses global_head_dim.
+        # Parent class writes these from config but we ensure correctness here.
+        head_dim = hp.get("head_dim", 256)
+        global_head_dim = hp.get("global_head_dim", head_dim)
+        self.gguf_writer.add_key_length(global_head_dim)
+        self.gguf_writer.add_value_length(global_head_dim)
+        self.gguf_writer.add_key_length_swa(head_dim)
+        self.gguf_writer.add_value_length_swa(head_dim)
+        self.gguf_writer.add_n_centroids(hp.get("num_centroids", 0))
+        self.gguf_writer.add_centroid_top_k(hp.get("centroid_intermediate_top_k", 0))
+        self.gguf_writer.add_n_embd_backbone(hp.get("backbone_hidden_size", 0))
+        self.gguf_writer.add_use_ordered_embeddings(hp.get("use_ordered_embeddings", False))
+        self.gguf_writer.add_attention_k_eq_v(hp.get("attention_k_eq_v", False))
+        # MTP head must be paired with this target architecture in llama.cpp
+        self.gguf_writer.add_requires_target_arch("gemma4")
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        if name.endswith("per_dim_scale") or name.endswith("layer_scalar"):
+            name = name + ".weight"
+
+        # Tied lm_head shares embed; skip standalone lm_head if present in checkpoint
+        if bid is None and name.endswith("lm_head.weight"):
+            return
+
+        # HF layout is [vocab, hidden_size]. Some checkpoints widen hidden to backbone_hidden_size;
+        # llama.cpp expects hidden_size (= text_config.hidden_size).
+        if bid is None and name == "model.embed_tokens.weight" and data_torch.ndim == 2:
+            hs = int(self.hparams["hidden_size"])
+            n_bb = int(self.hparams.get("backbone_hidden_size") or 0)
+            n_rows, n_cols = data_torch.shape
+            if n_rows > n_cols:
+                # [vocab, n_embd]
+                if n_cols > hs:
+                    logger.warning(f"gemma4_assistant: trimming embed_tokens weight columns {n_cols} -> {hs}")
+                    data_torch = data_torch[:, :hs].contiguous()
+            elif n_bb > 0 and n_cols > n_rows and n_rows >= n_bb and n_rows > hs:
+                logger.warning(f"gemma4_assistant: trimming embed_tokens weight rows {n_rows} -> {hs}")
+                data_torch = data_torch[:hs, :].contiguous()
+
+        if name == "pre_projection.weight":
+            # HF Linear (out, in) = (n_embd, 2*n_bb); GGUF / ggml mul_mat expects w ne [2*n_bb, n_embd]
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.MTP_PRE_PROJECTION), data_torch)
+            return
+        if name == "post_projection.weight":
+            # HF (n_bb, n_embd); GGUF ne [n_embd, n_bb] for mul_mat(h, w) with h [n_embd, ...]
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.MTP_POST_PROJECTION), data_torch)
+            return
+        if name.endswith("masked_embedding.centroids.weight"):
+            yield (self.format_tensor_name(gguf.MODEL_TENSOR.MTP_CENTROIDS), data_torch)
+            return
+        if "masked_embedding.token_ordering" in name:
+            # Write directly as I32 — bypasses prepare_tensors which forces 1D tensors to F32
+            tensor_name = self.format_tensor_name(gguf.MODEL_TENSOR.MTP_TOKEN_ORDERING)
+            data_i32 = data_torch.to(torch.int32).numpy()
+            self.gguf_writer.add_tensor(tensor_name, data_i32, raw_dtype=gguf.GGMLQuantizationType.I32)
+            logger.info(f"{tensor_name + ',':<48s} {data_torch.dtype} --> I32, shape = {{{data_i32.shape[0]}}}")
+            return
+
+        # Gemma4 norm shift is 0 (not +1 like Gemma3)
+        data_torch = data_torch + self.norm_shift(name)
+
+        # The assistant model's HF tensor names map directly (text-only, no language_model prefix).
+        new_name = self.map_tensor_name(name)
+        yield (new_name, data_torch)
+
+
 @ModelBase.register("Gemma4ForConditionalGeneration")
 class Gemma4VisionAudioModel(MmprojModel):
     has_audio_encoder = True

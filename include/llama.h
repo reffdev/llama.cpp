@@ -629,6 +629,20 @@ extern "C" {
     // Returns true if the model is diffusion-based (like LLaDA, Dream, etc.)
     LLAMA_API bool llama_model_is_diffusion(const struct llama_model * model);
 
+    // Gemma 4 MTP: load gemma4_assistant GGUF into a gemma4 target (call after llama_model_load_from_file, before llama_init_from_model).
+    // Returns 0 on success.
+    LLAMA_API int llama_model_load_mtp_from_file(
+            struct llama_model * model,
+            const char * path_mtp,
+            struct llama_model_params params);
+
+    LLAMA_API const struct llama_model * llama_model_get_mtp_assistant(const struct llama_model * model);
+
+    LLAMA_API bool llama_model_has_mtp_assistant(const struct llama_model * model);
+
+    // Backbone hidden size for MTP input (0 if no MTP assistant is loaded).
+    LLAMA_API uint32_t llama_model_mtp_n_embd_backbone(const struct llama_model * model);
+
     // Returns 0 on success
     LLAMA_API uint32_t llama_model_quantize(
             const char * fname_inp,
@@ -953,6 +967,18 @@ extern "C" {
     LLAMA_API int32_t llama_decode(
             struct llama_context * ctx,
               struct llama_batch   batch);
+
+    // Gemma 4 MTP: run n_steps of speculative drafting using the loaded MTP assistant.
+    // Reads h_prev (backbone hidden, n_bb floats) and writes draft tokens + updated h_prev.
+    // Returns 0 on success, negative on error.
+    LLAMA_API int32_t llama_decode_mtp(
+            struct llama_context * ctx,
+            llama_seq_id           seq_id,
+            llama_pos              attn_pos,
+            llama_token            last_token,
+            float *                h_prev,
+            int32_t                n_steps,
+            llama_token *          out_drafts);
 
     // Set the number of threads used for decoding
     // n_threads is the number of threads used for generation (single token)

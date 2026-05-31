@@ -10,7 +10,12 @@
 #include "ggml-cpp.h"
 #include "ggml-opt.h"
 
+#include <atomic>
+#include <condition_variable>
 #include <map>
+#include <mutex>
+#include <optional>
+#include <thread>
 #include <vector>
 
 struct llama_model;
@@ -138,6 +143,15 @@ struct llama_context {
     int encode(const llama_batch & batch_inp);
     int decode(const llama_batch & batch_inp);
 
+    // Gemma4 MTP: synchronous multi-step draft against the target context's KV.
+    int32_t decode_mtp(
+            llama_seq_id seq_id,
+            llama_pos    attn_pos,
+            llama_token  last_token,
+            float *      h_prev,
+            int32_t      n_steps,
+            llama_token * out_drafts);
+
     //
     // state save/load
     //
@@ -251,6 +265,21 @@ private:
             const llama_memory_context_i * mctx,
                           llm_graph_type   gtype) const;
 
+    // Build graph params for MTP: uses the MTP assistant's arch/hparams but the target's KV cache.
+    llm_graph_params graph_params_mtp(
+                        llm_graph_result * res,
+                      const llama_ubatch & ubatch,
+            const llama_memory_context_i * mctx) const;
+
+    // Lazily create sched_mtp and reserve compute buffers on first MTP call.
+    bool ensure_sched_mtp();
+
+    // Run the MTP graph for one ubatch on sched_mtp / gf_res_prev_mtp.
+    llm_graph_result * process_ubatch_mtp(
+            const llama_ubatch & ubatch,
+            llama_memory_context_i * mctx,
+            ggml_status & ret);
+
     llm_graph_cb graph_get_cb() const;
 
     // TODO: read/write lora adapters and cvec
@@ -349,6 +378,12 @@ private:
 
     llm_graph_result_ptr gf_res_prev;
     llm_graph_result_ptr gf_res_reserve;
+
+    // Dedicated MTP scheduler and graph result (Gemma4 MTP decode path)
+    ggml_backend_sched_ptr sched_mtp;
+    llm_graph_result_ptr   gf_res_prev_mtp;
+
+    std::mutex backend_cfg_mu;
 
     // host buffer for the model output (logits and embeddings)
     ggml_backend_buffer_ptr buf_output;
